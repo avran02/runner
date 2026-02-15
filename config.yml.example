@@ -1,0 +1,49 @@
+server:
+  port: "8080"
+
+deploy_header_key: "X-Gitlab-Token"
+
+# Конфигурация проектов: ключ = секрет из GitLab webhook
+projects:
+  "backend-secret-token-xyz":
+    name: "Backend API"
+    working_dir: "/var/www/backend-api"
+    ssh_key_path: "/home/deploy/.ssh/id_rsa_gitlab"  # SSH ключ для git fetch
+    deploy_branch: "master"  # можно опустить, по умолчанию master
+    debounce_time: "30s"
+    deploy_steps:
+      - cmd: "docker"
+        args: ["compose", "pull"]
+      - cmd: "docker"
+        args: ["compose", "up", "-d", "--remove-orphans"]
+
+  "frontend-secret-token-abc":
+    name: "Frontend"
+    working_dir: "/var/www/frontend"
+    ssh_key_path: "/home/deploy/.ssh/id_rsa_gitlab"
+    deploy_branch: "main"  # можно деплоить из другой ветки
+    debounce_time: "15s"
+    deploy_steps:
+      - cmd: "npm"
+        args: ["install"]
+      - cmd: "npm"
+        args: ["run", "build"]
+      - cmd: "systemctl"
+        args: ["restart", "nginx"]
+
+  "worker-secret-token-123":
+    name: "Worker Service"
+    working_dir: "/opt/workers/main"
+    ssh_key_path: "/home/deploy/.ssh/id_rsa_gitlab"
+    debounce_time: "20s"
+    deploy_steps:
+      - cmd: "go"
+        args: ["build", "-o", "worker", "."]
+      - cmd: "systemctl"
+        args: ["restart", "worker"]
+
+telegram:
+  enabled: true
+  bot_token: "YOUR_BOT_TOKEN"
+  chat_id: 123456789
+  thread_id: 0
