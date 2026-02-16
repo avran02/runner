@@ -3,6 +3,7 @@ package app
 import (
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -11,6 +12,18 @@ import (
 type DeployStep struct {
 	Cmd  string   `yaml:"cmd"`
 	Args []string `yaml:"args"`
+}
+
+func (s DeployStep) Name() string {
+	if s.Cmd == "" {
+		return "unknow"
+	}
+	parts := append([]string{s.Cmd}, s.Args...)
+	name := strings.Join(parts, " ")
+	if len(name) > 40 {
+		return name[:40] + "..."
+	}
+	return name
 }
 
 type ProjectConfig struct {
@@ -77,6 +90,42 @@ type GitLabPushEvent struct {
 	Ref         string `json:"ref"`
 	CheckoutSHA string `json:"checkout_sha"`
 	After       string `json:"after"`
+	UserName    string `json:"user_name"`
+	UserLogin   string `json:"user_username"`
+	Project     struct {
+		WebURL string `json:"web_url"`
+	} `json:"project"`
+	Commits []struct {
+		URL    string `json:"url"`
+		Author struct {
+			Name string `json:"name"`
+		} `json:"author"`
+	} `json:"commits"`
+}
+
+func (p GitLabPushEvent) ProjectURL() string {
+	return p.Project.WebURL
+}
+
+func (p GitLabPushEvent) Branch() string {
+	return strings.TrimPrefix(p.Ref, "refs/heads/")
+}
+
+func (p GitLabPushEvent) AuthorName() string {
+	if len(p.Commits) > 0 && p.Commits[0].Author.Name != "" {
+		return p.Commits[0].Author.Name
+	}
+	if p.UserName != "" {
+		return p.UserName
+	}
+	return p.UserLogin
+}
+
+func (p GitLabPushEvent) CommitURL() string {
+	if len(p.Commits) > 0 && p.Commits[0].URL != "" {
+		return p.Commits[0].URL
+	}
+	return "#"
 }
 
 func (p GitLabPushEvent) SHA() string {

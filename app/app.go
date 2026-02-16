@@ -8,22 +8,19 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"strconv"
 	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const (
-	FailedDeployMessage     = "❌ Deploy failed\nProject: %s\nSHA: %s\nError: %v\nDuration: %s"
-	SuccessfulDeployMessage = "✅ Deploy successful\nProject: %s\nSHA: %s\nDuration: %s"
-	StartedDeployMessage    = "🚀 Deploy started\nProject: %s\nSHA: %s"
-)
-
 type deployRequest struct {
 	projectKey string
 	sha        string
+	branch     string
+	author     string
+	commitURL  string
+	projectURL string
 	timestamp  time.Time
 }
 
@@ -52,14 +49,12 @@ func (a *App) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Извлекаем секрет из header'а
 	secret := r.Header.Get(a.Cfg.DeployHeaderKey)
 	if secret == "" {
 		http.Error(w, "missing secret header", http.StatusForbidden)
 		return
 	}
 
-	// Ищем проект по секрету
 	projectCfg, ok := a.Cfg.Projects[secret]
 	if !ok {
 		http.Error(w, "unknown project", http.StatusForbidden)
@@ -73,7 +68,6 @@ func (a *App) DeployHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("Incoming deploy for %s (SHA: %s)", secret, payload.SHA())
-	// Проверяем, что это нужная ветка
 	expectedRef := "refs/heads/" + projectCfg.GetDeployBranch()
 	if payload.Ref != expectedRef {
 		log.Printf("Expected ref %s, got %s", expectedRef, payload.Ref)
@@ -88,20 +82,21 @@ func (a *App) DeployHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusAccepted)
-
-	// Debounce: откладываем деплой и обновляем последний SHA
-	a.scheduleDeploy(secret, sha, projectCfg)
+	a.scheduleDeploy(secret, sha, payload.Branch(), payload.AuthorName(), payload.CommitURL(), payload.ProjectURL(), projectCfg)
 }
 
-func (a *App) scheduleDeploy(projectKey, sha string, cfg ProjectConfig) {
+func (a *App) scheduleDeploy(projectKey, sha, branch, author, commitURL string, projectURL string, cfg ProjectConfig) {
 	log.Printf("Scheduling deploy for %s (SHA: %s)", projectKey, sha)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// Обновляем pending request
 	a.pendingDeploys[projectKey] = &deployRequest{
 		projectKey: projectKey,
 		sha:        sha,
+		branch:     branch,
+		author:     author,
+		commitURL:  commitURL,
+		projectURL: projectURL,
 		timestamp:  time.Now(),
 	}
 
@@ -110,7 +105,6 @@ func (a *App) scheduleDeploy(projectKey, sha string, cfg ProjectConfig) {
 		timer.Stop()
 	}
 
-	// Создаём новый таймер
 	debounce := cfg.GetDebounceDuration()
 	a.deployTimers[projectKey] = time.AfterFunc(debounce, func() {
 		a.executeDeploy(projectKey, cfg)
@@ -131,62 +125,55 @@ func (a *App) executeDeploy(projectKey string, cfg ProjectConfig) {
 	a.mu.Unlock()
 
 	log.Printf("Executing deploy for %s (SHA: %s)", projectKey, req.sha)
-	a.runDeploy(projectKey, req.sha, cfg)
+	a.runDeploy(req, cfg)
 }
 
-func (a *App) runDeploy(projectKey, sha string, cfg ProjectConfig) {
+func (a *App) runDeploy(req *deployRequest, cfg ProjectConfig) {
 	a.deployMutex.Lock()
 	defer a.deployMutex.Unlock()
 
 	start := time.Now()
-	a.sendTelegram(fmt.Sprintf(StartedDeployMessage, cfg.Name, sha))
+	a.sendTelegramAndGetID(msgStarted(cfg.Name, req.sha, req.branch, req.author, req.commitURL, req.projectURL))
 
-	if err := a.checkoutSHA(sha, cfg.WorkingDir, cfg.SSHKeyPath); err != nil {
-		a.failDeploy(start, cfg.Name, sha, err)
+	if err := a.checkoutSHA(req.sha, cfg.WorkingDir, cfg.SSHKeyPath); err != nil {
+		a.sendTelegram(msgFailed(cfg.Name, req.sha, req.branch, req.author, req.commitURL, req.projectURL, time.Since(start), err))
 		return
 	}
 
-	if err := a.runConfiguredSteps(cfg); err != nil {
-		a.failDeploy(start, cfg.Name, sha, err)
-		return
+	totalSteps := len(cfg.DeploySteps)
+
+	progressMsgID := a.sendTelegramAndGetID(
+		msgSteps(cfg.Name, cfg.DeploySteps, 0, totalSteps, stepRunning),
+	)
+
+	for i, step := range cfg.DeploySteps {
+		a.editTelegram(progressMsgID,
+			msgSteps(cfg.Name, cfg.DeploySteps, i, totalSteps, stepRunning),
+		)
+
+		if err := runCmd(cfg.WorkingDir, cfg.SSHKeyPath, step.Cmd, step.Args...); err != nil {
+			a.editTelegram(progressMsgID,
+				msgSteps(cfg.Name, cfg.DeploySteps, i, totalSteps, stepFailed),
+			)
+			a.sendTelegram(msgFailed(cfg.Name, req.sha, req.branch, req.author, req.commitURL, req.projectURL, time.Since(start), err))
+			return
+		}
 	}
 
-	a.sendTelegram(fmt.Sprintf(
-		SuccessfulDeployMessage,
-		cfg.Name,
-		sha,
-		time.Since(start),
-	))
-	log.Printf("Deploy for %s (SHA: %s) completed successfully", projectKey, sha)
+	a.editTelegram(progressMsgID,
+		msgSteps(cfg.Name, cfg.DeploySteps, totalSteps, totalSteps, stepDone),
+	)
+	a.sendTelegram(msgSuccess(cfg.Name, req.sha, req.branch, req.author, req.commitURL, time.Since(start), req.projectURL))
+	log.Printf("Deploy for %s (SHA: %s) completed successfully", req.projectKey, req.sha)
 }
 
-func (a *App) failDeploy(start time.Time, projectName, sha string, err error) {
-	a.sendTelegram(fmt.Sprintf(
-		FailedDeployMessage,
-		projectName,
-		sha,
-		err,
-		time.Since(start),
-	))
-}
-
-func (a *App) checkoutSHA(sha, workingDir string, sshKeyPath string) error {
+func (a *App) checkoutSHA(sha, workingDir, sshKeyPath string) error {
 	steps := [][]string{
 		{"git", "fetch", "origin", sha},
 		{"git", "checkout", "--detach", sha},
 	}
-
 	for _, s := range steps {
 		if err := runCmd(workingDir, sshKeyPath, s[0], s[1:]...); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (a *App) runConfiguredSteps(cfg ProjectConfig) error {
-	for _, step := range cfg.DeploySteps {
-		if err := runCmd(cfg.WorkingDir, cfg.SSHKeyPath, step.Cmd, step.Args...); err != nil {
 			return err
 		}
 	}
@@ -200,7 +187,6 @@ func runCmd(workingDir, sshKeyPath, cmd string, args ...string) error {
 	c := exec.CommandContext(ctx, cmd, args...)
 	c.Dir = workingDir
 
-	// Если указан SSH ключ, настраиваем git для его использования
 	if sshKeyPath != "" {
 		c.Env = append(os.Environ(),
 			fmt.Sprintf("GIT_SSH_COMMAND=ssh -i %s -o StrictHostKeyChecking=no", sshKeyPath),
@@ -210,26 +196,6 @@ func runCmd(workingDir, sshKeyPath, cmd string, args ...string) error {
 	out, err := c.CombinedOutput()
 	log.Printf("CMD [%s]: %s %v\n%s\n", workingDir, cmd, args, string(out))
 	return err
-}
-
-func (a *App) sendTelegram(text string) {
-	if a.Cfg.Telegram.Enabled {
-		if err := a.sendToThread(text, a.Cfg.Telegram.ChatID, a.Cfg.Telegram.ThreadID); err != nil {
-			log.Println(err.Error())
-		}
-	}
-}
-
-func (a *App) sendToThread(text string, chatID int64, threadID int64) error {
-	params := tgbotapi.Params{
-		"chat_id":           strconv.Itoa(int(chatID)),
-		"message_thread_id": strconv.Itoa(int(threadID)),
-		"text":              text,
-	}
-	if _, err := a.Bot.MakeRequest("sendMessage", params); err != nil {
-		return err
-	}
-	return nil
 }
 
 func decodePayload(r *http.Request) (GitLabPushEvent, error) {
