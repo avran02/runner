@@ -53,6 +53,13 @@ func (p *ProjectConfig) GetDeployBranch() string {
 	return p.DeployBranch
 }
 
+type Telegram struct {
+	Enabled  bool   `yaml:"enabled"`
+	BotToken string `yaml:"bot_token"`
+	ChatID   int64  `yaml:"chat_id"`
+	ThreadID int64  `yaml:"thread_id"`
+}
+
 type Config struct {
 	Server struct {
 		Port string `yaml:"port"`
@@ -63,12 +70,7 @@ type Config struct {
 	// Map: gitlab secret token -> deploy config
 	Projects map[string]ProjectConfig `yaml:"projects"`
 
-	Telegram struct {
-		Enabled  bool   `yaml:"enabled"`
-		BotToken string `yaml:"bot_token"`
-		ChatID   int64  `yaml:"chat_id"`
-		ThreadID int64  `yaml:"thread_id"`
-	} `yaml:"telegram"`
+	Telegram Telegram `yaml:"telegram"`
 }
 
 func MustLoadConfig(path string) Config {

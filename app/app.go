@@ -67,7 +67,7 @@ func (a *App) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Incoming deploy for %s (SHA: %s)", secret, payload.SHA())
+	log.Printf("Incoming deploy for %s (SHA: %s)", payload.ProjectURL(), payload.SHA())
 	expectedRef := "refs/heads/" + projectCfg.GetDeployBranch()
 	if payload.Ref != expectedRef {
 		log.Printf("Expected ref %s, got %s", expectedRef, payload.Ref)
@@ -136,7 +136,7 @@ func (a *App) runDeploy(req *deployRequest, cfg ProjectConfig) {
 	a.sendTelegramAndGetID(msgStarted(cfg.Name, req.sha, req.branch, req.author, req.commitURL, req.projectURL))
 
 	if err := a.checkoutSHA(req.sha, cfg.WorkingDir, cfg.SSHKeyPath); err != nil {
-		a.sendTelegram(msgFailed(cfg.Name, req.sha, req.branch, req.author, req.commitURL, req.projectURL, time.Since(start), err))
+		a.sendTelegramAndGetID(msgFailed(cfg.Name, req.sha, req.branch, req.author, req.commitURL, req.projectURL, time.Since(start), err))
 		return
 	}
 
@@ -155,7 +155,7 @@ func (a *App) runDeploy(req *deployRequest, cfg ProjectConfig) {
 			a.editTelegram(progressMsgID,
 				msgSteps(cfg.Name, cfg.DeploySteps, i, totalSteps, stepFailed),
 			)
-			a.sendTelegram(msgFailed(cfg.Name, req.sha, req.branch, req.author, req.commitURL, req.projectURL, time.Since(start), err))
+			a.sendTelegramAndGetID(msgFailed(cfg.Name, req.sha, req.branch, req.author, req.commitURL, req.projectURL, time.Since(start), err))
 			return
 		}
 	}
@@ -163,7 +163,7 @@ func (a *App) runDeploy(req *deployRequest, cfg ProjectConfig) {
 	a.editTelegram(progressMsgID,
 		msgSteps(cfg.Name, cfg.DeploySteps, totalSteps, totalSteps, stepDone),
 	)
-	a.sendTelegram(msgSuccess(cfg.Name, req.sha, req.branch, req.author, req.commitURL, time.Since(start), req.projectURL))
+	a.sendTelegramAndGetID(msgSuccess(cfg.Name, req.sha, req.branch, req.author, req.commitURL, time.Since(start), req.projectURL))
 	log.Printf("Deploy for %s (SHA: %s) completed successfully", req.projectKey, req.sha)
 }
 
@@ -178,6 +178,10 @@ func (a *App) checkoutSHA(sha, workingDir, sshKeyPath string) error {
 		}
 	}
 	return nil
+}
+
+func (a *App) sendTelegramAndGetID(msg string) int {
+	return sendTelegramAndGetID(msg, a.Cfg.Telegram, a.Bot)
 }
 
 func runCmd(workingDir, sshKeyPath, cmd string, args ...string) error {

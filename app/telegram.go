@@ -139,25 +139,19 @@ func progressBar(current, total int) string {
 	return fmt.Sprintf("`[%s]` %d/%d", bar, current, total)
 }
 
-func (a *App) sendTelegram(text string) {
-	if !a.Cfg.Telegram.Enabled {
-		return
-	}
-	a.sendTelegramAndGetID(text)
-}
-
-func (a *App) sendTelegramAndGetID(text string) int {
-	if !a.Cfg.Telegram.Enabled {
+func sendTelegramAndGetID(text string, tgConf Telegram, bot *tgbotapi.BotAPI) int {
+	if !tgConf.Enabled {
 		return 0
 	}
+
 	params := tgbotapi.Params{
-		"chat_id":                  strconv.Itoa(int(a.Cfg.Telegram.ChatID)),
-		"message_thread_id":        strconv.Itoa(int(a.Cfg.Telegram.ThreadID)),
+		"chat_id":                  strconv.Itoa(int(tgConf.ChatID)),
+		"message_thread_id":        strconv.Itoa(int(tgConf.ThreadID)),
 		"text":                     text,
 		"parse_mode":               "MarkdownV2",
 		"disable_web_page_preview": "true",
 	}
-	resp, err := a.Bot.MakeRequest("sendMessage", params)
+	resp, err := bot.MakeRequest("sendMessage", params)
 	if err != nil {
 		log.Printf("telegram send error: %v", err)
 		return 0
@@ -184,7 +178,10 @@ func (a *App) editTelegram(messageID int, text string) {
 		"parse_mode":               "MarkdownV2",
 		"disable_web_page_preview": "true",
 	}
-	if _, err := a.Bot.MakeRequest("editMessageText", params); err != nil {
+	if res, err := a.Bot.MakeRequest("editMessageText", params); err != nil {
+		if res.ErrorCode == 400 {
+			return
+		}
 		log.Printf("telegram edit error: %v", err)
 	}
 }
