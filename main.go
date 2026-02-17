@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"main/app"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 )
 
 func main() {
+	fmt.Println("Deploy runner starting... Version: 0.0.0")
 	cfg := app.MustLoadConfig("config.yml")
 
 	var bot *tgbotapi.BotAPI

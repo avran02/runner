@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,11 +17,7 @@ import (
 
 type deployRequest struct {
 	projectKey string
-	sha        string
-	branch     string
-	author     string
-	commitURL  string
-	projectURL string
+	payload    GitLabPushEvent // весь payload с коммитами, автором и т.д.
 	timestamp  time.Time
 }
 
@@ -82,21 +79,18 @@ func (a *App) DeployHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusAccepted)
-	a.scheduleDeploy(secret, sha, payload.Branch(), payload.AuthorName(), payload.CommitURL(), payload.ProjectURL(), projectCfg)
+	a.scheduleDeploy(secret, payload, projectCfg)
 }
 
-func (a *App) scheduleDeploy(projectKey, sha, branch, author, commitURL string, projectURL string, cfg ProjectConfig) {
-	log.Printf("Scheduling deploy for %s (SHA: %s)", projectKey, sha)
+func (a *App) scheduleDeploy(projectKey string, payload GitLabPushEvent, cfg ProjectConfig) {
+	log.Printf("Scheduling deploy for %s (SHA: %s)", projectKey, payload.SHA())
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// Сохраняем весь payload - в нём есть всё: коммиты, автор, URL'ы
 	a.pendingDeploys[projectKey] = &deployRequest{
 		projectKey: projectKey,
-		sha:        sha,
-		branch:     branch,
-		author:     author,
-		commitURL:  commitURL,
-		projectURL: projectURL,
+		payload:    payload,
 		timestamp:  time.Now(),
 	}
 
@@ -110,7 +104,7 @@ func (a *App) scheduleDeploy(projectKey, sha, branch, author, commitURL string, 
 		a.executeDeploy(projectKey, cfg)
 	})
 
-	log.Printf("Scheduled deploy for %s (SHA: %s) with %v debounce", projectKey, sha, debounce)
+	log.Printf("Scheduled deploy for %s (SHA: %s) with %v debounce", projectKey, payload.SHA(), debounce)
 }
 
 func (a *App) executeDeploy(projectKey string, cfg ProjectConfig) {
@@ -124,7 +118,7 @@ func (a *App) executeDeploy(projectKey string, cfg ProjectConfig) {
 	delete(a.deployTimers, projectKey)
 	a.mu.Unlock()
 
-	log.Printf("Executing deploy for %s (SHA: %s)", projectKey, req.sha)
+	log.Printf("Executing deploy for %s (SHA: %s)", projectKey, req.payload.SHA())
 	a.runDeploy(req, cfg)
 }
 
@@ -133,15 +127,31 @@ func (a *App) runDeploy(req *deployRequest, cfg ProjectConfig) {
 	defer a.deployMutex.Unlock()
 
 	start := time.Now()
-	a.sendTelegramAndGetID(msgStarted(cfg.Name, req.sha, req.branch, req.author, req.commitURL, req.projectURL))
+	payload := req.payload
 
-	if err := a.checkoutSHA(req.sha, cfg.WorkingDir, cfg.SSHKeyPath); err != nil {
-		a.sendTelegramAndGetID(msgFailed(cfg.Name, req.sha, req.branch, req.author, req.commitURL, req.projectURL, time.Since(start), err))
+	// Извлекаем данные из payload
+	sha := payload.SHA()
+	branch := payload.Branch()
+	author := payload.AuthorName()
+	commitURL := payload.CommitURL()
+	projectURL := payload.ProjectURL()
+	commitsSummary := escape(payload.CommitsSummary(5)) // последние 5 коммитов
+
+	// Отправляем стартовое сообщение
+	startMsgID := a.sendTelegramAndGetID(
+		msgStarted(cfg.Name, sha, branch, author, commitURL, projectURL, commitsSummary),
+	)
+
+	// Checkout SHA
+	if err := a.checkoutSHA(sha, cfg.WorkingDir, cfg.SSHKeyPath); err != nil {
+		a.sendTelegramAndGetID(
+			msgFailed(cfg.Name, sha, branch, author, commitURL, projectURL, time.Since(start), err, commitsSummary),
+		)
 		return
 	}
 
+	// Прогресс по шагам
 	totalSteps := len(cfg.DeploySteps)
-
 	progressMsgID := a.sendTelegramAndGetID(
 		msgSteps(cfg.Name, cfg.DeploySteps, 0, totalSteps, stepRunning),
 	)
@@ -155,16 +165,30 @@ func (a *App) runDeploy(req *deployRequest, cfg ProjectConfig) {
 			a.editTelegram(progressMsgID,
 				msgSteps(cfg.Name, cfg.DeploySteps, i, totalSteps, stepFailed),
 			)
-			a.sendTelegramAndGetID(msgFailed(cfg.Name, req.sha, req.branch, req.author, req.commitURL, req.projectURL, time.Since(start), err))
+			a.sendTelegramAndGetID(
+				msgFailed(cfg.Name, sha, branch, author, commitURL, projectURL, time.Since(start), err, commitsSummary),
+			)
 			return
 		}
 	}
 
+	// Успешный деплой
 	a.editTelegram(progressMsgID,
 		msgSteps(cfg.Name, cfg.DeploySteps, totalSteps, totalSteps, stepDone),
 	)
-	a.sendTelegramAndGetID(msgSuccess(cfg.Name, req.sha, req.branch, req.author, req.commitURL, time.Since(start), req.projectURL))
-	log.Printf("Deploy for %s (SHA: %s) completed successfully", req.projectKey, req.sha)
+
+	// Редактируем стартовое сообщение на успешное
+	if startMsgID > 0 {
+		a.editTelegram(startMsgID,
+			msgSuccess(cfg.Name, sha, branch, author, commitURL, time.Since(start), projectURL, commitsSummary),
+		)
+	} else {
+		a.sendTelegramAndGetID(
+			msgSuccess(cfg.Name, sha, branch, author, commitURL, time.Since(start), projectURL, commitsSummary),
+		)
+	}
+
+	log.Printf("Deploy for %s (SHA: %s) completed successfully", req.projectKey, sha)
 }
 
 func (a *App) checkoutSHA(sha, workingDir, sshKeyPath string) error {
@@ -181,7 +205,7 @@ func (a *App) checkoutSHA(sha, workingDir, sshKeyPath string) error {
 }
 
 func (a *App) sendTelegramAndGetID(msg string) int {
-	return sendTelegramAndGetID(msg, a.Cfg.Telegram, a.Bot)
+	return sendTelegramAndGetID(msg, Telegram(a.Cfg.Telegram), a.Bot)
 }
 
 func runCmd(workingDir, sshKeyPath, cmd string, args ...string) error {
@@ -197,9 +221,16 @@ func runCmd(workingDir, sshKeyPath, cmd string, args ...string) error {
 		)
 	}
 
-	out, err := c.CombinedOutput()
-	log.Printf("CMD [%s]: %s %v\n%s\n", workingDir, cmd, args, string(out))
-	return err
+	var stdout, stderr bytes.Buffer
+	c.Stdout = &stdout
+	c.Stderr = &stderr
+	err := c.Run()
+
+	if err != nil && stderr.Len() > 0 {
+		return fmt.Errorf("%w: %s", err, stderr.String())
+	}
+
+	return nil
 }
 
 func decodePayload(r *http.Request) (GitLabPushEvent, error) {

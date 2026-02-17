@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -12,18 +13,6 @@ import (
 type DeployStep struct {
 	Cmd  string   `yaml:"cmd"`
 	Args []string `yaml:"args"`
-}
-
-func (s DeployStep) Name() string {
-	if s.Cmd == "" {
-		return "unknow"
-	}
-	parts := append([]string{s.Cmd}, s.Args...)
-	name := strings.Join(parts, " ")
-	if len(name) > 40 {
-		return name[:40] + "..."
-	}
-	return name
 }
 
 type ProjectConfig struct {
@@ -98,36 +87,15 @@ type GitLabPushEvent struct {
 		WebURL string `json:"web_url"`
 	} `json:"project"`
 	Commits []struct {
-		URL    string `json:"url"`
-		Author struct {
+		ID      string `json:"id"`
+		Message string `json:"message"`
+		Title   string `json:"title"`
+		URL     string `json:"url"`
+		Author  struct {
 			Name string `json:"name"`
 		} `json:"author"`
 	} `json:"commits"`
-}
-
-func (p GitLabPushEvent) ProjectURL() string {
-	return p.Project.WebURL
-}
-
-func (p GitLabPushEvent) Branch() string {
-	return strings.TrimPrefix(p.Ref, "refs/heads/")
-}
-
-func (p GitLabPushEvent) AuthorName() string {
-	if len(p.Commits) > 0 && p.Commits[0].Author.Name != "" {
-		return p.Commits[0].Author.Name
-	}
-	if p.UserName != "" {
-		return p.UserName
-	}
-	return p.UserLogin
-}
-
-func (p GitLabPushEvent) CommitURL() string {
-	if len(p.Commits) > 0 && p.Commits[0].URL != "" {
-		return p.Commits[0].URL
-	}
-	return "#"
+	TotalCommitsCount int `json:"total_commits_count"`
 }
 
 func (p GitLabPushEvent) SHA() string {
@@ -135,4 +103,83 @@ func (p GitLabPushEvent) SHA() string {
 		return p.CheckoutSHA
 	}
 	return p.After
+}
+
+func (p GitLabPushEvent) Author() string {
+	if p.UserName != "" {
+		return p.UserName
+	}
+	if p.UserLogin != "" {
+		return p.UserLogin
+	}
+	if len(p.Commits) > 0 {
+		return p.Commits[len(p.Commits)-1].Author.Name
+	}
+	return "Unknown"
+}
+
+// Алиас для совместимости
+func (p GitLabPushEvent) AuthorName() string {
+	return p.Author()
+}
+
+func (p GitLabPushEvent) Branch() string {
+	// refs/heads/main -> main
+	if strings.HasPrefix(p.Ref, "refs/heads/") {
+		return strings.TrimPrefix(p.Ref, "refs/heads/")
+	}
+	return p.Ref
+}
+
+func (p GitLabPushEvent) CommitURL() string {
+	// Берём URL последнего коммита (который задеплоили)
+	if len(p.Commits) > 0 {
+		return p.Commits[len(p.Commits)-1].URL
+	}
+	// Fallback: собираем URL из project web_url
+	if p.Project.WebURL != "" && p.SHA() != "" {
+		return fmt.Sprintf("%s/-/commit/%s", p.Project.WebURL, p.SHA())
+	}
+	return ""
+}
+
+func (p GitLabPushEvent) ProjectURL() string {
+	return p.Project.WebURL
+}
+
+// CommitsSummary возвращает красивую сводку коммитов для quote
+func (p GitLabPushEvent) CommitsSummary(maxCommits int) string {
+	if len(p.Commits) == 0 {
+		return ""
+	}
+
+	var lines []string
+
+	// Показываем максимум N коммитов
+	commits := p.Commits
+	if len(commits) > maxCommits {
+		commits = commits[len(commits)-maxCommits:] // последние N
+	}
+
+	for _, c := range commits {
+		// Используем title (первая строка) вместо полного message
+		title := c.Title
+		if title == "" {
+			title = strings.Split(c.Message, "\n")[0]
+		}
+
+		// Обрезаем длинные сообщения
+		if len(title) > 60 {
+			title = title[:57] + "..."
+		}
+
+		lines = append(lines, fmt.Sprintf("• %s", title))
+	}
+
+	// Если коммитов больше, чем показали
+	if p.TotalCommitsCount > maxCommits {
+		lines = append(lines, fmt.Sprintf("...and %d more commits", p.TotalCommitsCount-maxCommits))
+	}
+
+	return strings.Join(lines, "\n")
 }

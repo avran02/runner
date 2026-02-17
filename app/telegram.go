@@ -19,26 +19,33 @@ const (
 	stepFailed
 )
 
-func msgStarted(projectName, sha, branch, author, commitURL string, projectURL string) string {
-	return fmt.Sprintf(
-		"🚀 *Deploy started* \n"+
+func msgStarted(projectName, sha, branch, author, commitURL string, projectURL string, commitsSummary string) string {
+	msg := fmt.Sprintf(
+		"🚀 *Deploy started*\n"+
 			"> *Project*: [%s](%s)\n\n"+
 			"⛓️ Branch: `%s`\n"+
-			"📋 SHA: [%s](%s)\n\n"+
+			"📋 SHA: [%s](%s)\n"+
 			"👤 Author: `%s`",
 		escape(projectName), projectURL,
 		escape(branch),
 		escape(shortSHA(sha)), commitURL,
 		escape(author),
 	)
+
+	// Добавляем сводку коммитов если есть
+	if commitsSummary != "" {
+		msg += fmt.Sprintf("\n\n📝 *Commits:*\n%s", commitsSummary)
+	}
+
+	return msg
 }
 
-func msgSuccess(projectName, sha, branch, author, commitURL string, duration time.Duration, projectURL string) string {
-	return fmt.Sprintf(
+func msgSuccess(projectName, sha, branch, author, commitURL string, duration time.Duration, projectURL string, commitsSummary string) string {
+	msg := fmt.Sprintf(
 		"✅ *Deploy successful*\n"+
 			"> Project: [%s](%s)\n\n"+
 			"⛓️ Branch: `%s`\n"+
-			"📋 SHA: [%s](%s)\n\n"+
+			"📋 SHA: [%s](%s)\n"+
 			"👤 Author: `%s`\n"+
 			"⏱ Duration: `%s`",
 		escape(projectName), projectURL,
@@ -47,14 +54,20 @@ func msgSuccess(projectName, sha, branch, author, commitURL string, duration tim
 		escape(author),
 		escape(duration.Round(time.Second).String()),
 	)
+
+	if commitsSummary != "" {
+		msg += fmt.Sprintf("\n\n📝 *Commits:*\n%s", commitsSummary)
+	}
+
+	return msg
 }
 
-func msgFailed(projectName, sha, branch, author, commitURL string, projectURL string, duration time.Duration, err error) string {
-	return fmt.Sprintf(
+func msgFailed(projectName, sha, branch, author, commitURL string, projectURL string, duration time.Duration, err error, commitsSummary string) string {
+	msg := fmt.Sprintf(
 		"❌ *Deploy failed*\n"+
 			"> *Project*: [%s](%s)\n\n"+
 			"⛓️ Branch: `%s`\n"+
-			"📋 SHA: [%s](%s)\n\n"+
+			"📋 SHA: [%s](%s)\n"+
 			"👤 Author: `%s`\n"+
 			"⏱ Duration: `%s`\n\n"+
 			"⚠️ Error:\n```\n%s\n```",
@@ -65,6 +78,12 @@ func msgFailed(projectName, sha, branch, author, commitURL string, projectURL st
 		escape(duration.Round(time.Second).String()),
 		escape(truncate(err.Error(), 300)),
 	)
+
+	if commitsSummary != "" {
+		msg += fmt.Sprintf("\n\n📝 *Commits:*\n%s", commitsSummary)
+	}
+
+	return msg
 }
 
 // Рисуем весь список шагов с иконками
@@ -140,7 +159,7 @@ func progressBar(current, total int) string {
 }
 
 func sendTelegramAndGetID(text string, tgConf Telegram, bot *tgbotapi.BotAPI) int {
-	if !tgConf.Enabled {
+	if !tgConf.Enabled || bot == nil {
 		return 0
 	}
 
@@ -168,7 +187,7 @@ func sendTelegramAndGetID(text string, tgConf Telegram, bot *tgbotapi.BotAPI) in
 }
 
 func (a *App) editTelegram(messageID int, text string) {
-	if !a.Cfg.Telegram.Enabled || messageID == 0 {
+	if !a.Cfg.Telegram.Enabled || messageID == 0 || a.Bot == nil {
 		return
 	}
 	params := tgbotapi.Params{
@@ -184,4 +203,9 @@ func (a *App) editTelegram(messageID int, text string) {
 		}
 		log.Printf("telegram edit error: %v", err)
 	}
+}
+
+// Добавляем метод Name для DeployStep
+func (d DeployStep) Name() string {
+	return fmt.Sprintf("%s %s", d.Cmd, strings.Join(d.Args, " "))
 }

@@ -1,0 +1,27 @@
+[Unit]
+Description=Lightweight Deploy Runner
+After=network-online.target
+
+[Service]
+Type=simple
+User=user
+Group=user
+
+WorkingDirectory=/home/user/runner
+ExecStart=/home/user/runner/main
+
+Restart=always
+RestartSec=5s
+
+# Логирование
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=runner
+
+# Graceful shutdown
+TimeoutStopSec=60s
+KillMode=mixed
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
