@@ -1,5 +1,7 @@
 server:
   port: "8080"
+  storage_path: "deploys.jsonl"  # путь к JSONL-файлу с историей деплоев
+  history_size: 3                 # сколько последних деплоев хранить на проект
 
 deploy_header_key: "X-Gitlab-Token"
 
@@ -8,8 +10,8 @@ projects:
   "backend-secret-token-xyz":
     name: "Backend API"
     working_dir: "/var/www/backend-api"
-    ssh_key_path: "/home/deploy/.ssh/id_rsa_gitlab"  # SSH ключ для git fetch
-    deploy_branch: "master"  # можно опустить, по умолчанию master
+    ssh_key_path: "/home/deploy/.ssh/id_rsa_gitlab"
+    deploy_branch: "master"
     debounce_time: "30s"
     deploy_steps:
       - cmd: "docker"
@@ -21,7 +23,7 @@ projects:
     name: "Frontend"
     working_dir: "/var/www/frontend"
     ssh_key_path: "/home/deploy/.ssh/id_rsa_gitlab"
-    deploy_branch: "main"  # можно деплоить из другой ветки
+    deploy_branch: "main"
     debounce_time: "15s"
     deploy_steps:
       - cmd: "npm"
@@ -31,19 +33,31 @@ projects:
       - cmd: "systemctl"
         args: ["restart", "nginx"]
 
-  "worker-secret-token-123":
-    name: "Worker Service"
-    working_dir: "/opt/workers/main"
-    ssh_key_path: "/home/deploy/.ssh/id_rsa_gitlab"
-    debounce_time: "20s"
-    deploy_steps:
-      - cmd: "go"
-        args: ["build", "-o", "worker", "."]
-      - cmd: "systemctl"
-        args: ["restart", "worker"]
+# --- Уведомления ---
 
 telegram:
   enabled: true
   bot_token: "YOUR_BOT_TOKEN"
   chat_id: 123456789
-  thread_id: 0
+  thread_id: 0  # 0 = без топика
+
+ntfy:
+  enabled: false
+  url: "https://ntfy.sh/my-topic"  # или self-hosted: http://ntfy.example.com/topic
+  token: ""                         # Bearer-токен, если включена авторизация
+  priority: 0                       # 0 = auto (3 для info, 4 для warning, 5 для error)
+
+# notify управляет, куда и как отправлять события деплоя.
+# mode: "all"      — отправить во все каналы
+# mode: "fallback" — попробовать по очереди, остановиться на первом доступном
+# channels: порядок важен для fallback
+notify:
+  mode: "fallback"
+  channels:
+    - telegram
+    - ntfy
+
+# --- Статус деплоев ---
+# GET /status             → все проекты (indented JSON)
+# GET /status?name=NAME   → один проект по имени
+# Рекомендуется закрыть через nginx auth_basic или разрешить только с localhost.
