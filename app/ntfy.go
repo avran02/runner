@@ -53,10 +53,16 @@ func (h *ntfyHandle) Progress(idx int, status stepStatus) {
 }
 
 func (h *ntfyHandle) Success(info DeployInfo) {
+	body := fmt.Sprintf("Branch: %s\nSHA: %s\nDuration: %s",
+		info.Branch, shortSHA(info.SHA), info.Duration.Round(time.Second))
+
+	if info.CommitsSummary != "" {
+		body += "\n\nCommits:\n" + info.CommitsSummary
+	}
+
 	h.n.send(
 		fmt.Sprintf("✅ Deploy successful: %s", info.ProjectName),
-		fmt.Sprintf("Branch: %s\nSHA: %s\nDuration: %s",
-			info.Branch, shortSHA(info.SHA), info.Duration.Round(time.Second)),
+		body,
 		h.n.prio(3),
 	)
 }
