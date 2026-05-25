@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
@@ -217,6 +218,44 @@ func (a *App) checkoutSHA(sha, workingDir, sshKeyPath string) error {
 	return nil
 }
 
+// startSSHAgent starts a new ssh-agent, loads the given key into it, and
+// returns the socket path, the agent's environment vars, and a cleanup func.
+// Docker BuildKit's --mount=type=ssh requires SSH_AUTH_SOCK to be set.
+func startSSHAgent(keyPath string) (agentEnv []string, cleanup func(), err error) {
+	out, err := exec.Command("ssh-agent", "-s").Output()
+	if err != nil {
+		return nil, nil, fmt.Errorf("ssh-agent: %w", err)
+	}
+
+	var sock, pid string
+	for _, line := range strings.Split(string(out), "\n") {
+		if v, ok := strings.CutPrefix(line, "SSH_AUTH_SOCK="); ok {
+			sock, _, _ = strings.Cut(v, ";")
+		}
+		if v, ok := strings.CutPrefix(line, "SSH_AGENT_PID="); ok {
+			pid, _, _ = strings.Cut(v, ";")
+		}
+	}
+	if sock == "" || pid == "" {
+		return nil, nil, fmt.Errorf("ssh-agent: could not parse output: %s", out)
+	}
+
+	agentEnv = []string{"SSH_AUTH_SOCK=" + sock, "SSH_AGENT_PID=" + pid}
+
+	addCmd := exec.Command("ssh-add", keyPath)
+	addCmd.Env = append(os.Environ(), agentEnv...)
+	if addOut, addErr := addCmd.CombinedOutput(); addErr != nil {
+		return nil, nil, fmt.Errorf("ssh-add: %w: %s", addErr, addOut)
+	}
+
+	cleanup = func() {
+		killCmd := exec.Command("ssh-agent", "-k")
+		killCmd.Env = append(os.Environ(), agentEnv...)
+		killCmd.Run()
+	}
+	return agentEnv, cleanup, nil
+}
+
 func runCmd(workingDir, sshKeyPath, cmd string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
@@ -225,10 +264,17 @@ func runCmd(workingDir, sshKeyPath, cmd string, args ...string) error {
 	c.Dir = workingDir
 
 	if sshKeyPath != "" {
+		agentEnv, cleanup, err := startSSHAgent(sshKeyPath)
+		if err != nil {
+			return fmt.Errorf("ssh agent setup: %w", err)
+		}
+		defer cleanup()
+
 		c.Env = append(os.Environ(),
 			fmt.Sprintf("GIT_SSH_COMMAND=ssh -i %s -o StrictHostKeyChecking=no", sshKeyPath),
 			"DOCKER_BUILDKIT=1",
 		)
+		c.Env = append(c.Env, agentEnv...)
 	}
 
 	var stdout, stderr bytes.Buffer
